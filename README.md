@@ -1,0 +1,2 @@
+# MagiCore
+MTG Learning-Model
