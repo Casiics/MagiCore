@@ -203,31 +203,29 @@ class Player:
         ]
         
         best_attack_combination = []
-        # Der Basis-Score ist der Zustand, in dem nicht angegriffen wird.
         best_score = self.evaluate_state() 
         logging.info(f"KI-Angriffsanalyse: Basis-Score (kein Angriff) = {best_score:.2f}")
 
-        # Iteriere durch alle möglichen Kombinationen von Angreifern (von 1 bis alle)
+        # Iteriere durch alle möglichen Kombinationen von Angreifern
         for i in range(1, len(potential_attackers) + 1):
             for combo in itertools.combinations(potential_attackers, i):
-                # Simuliere den Angriff für diese spezifische Kombination
                 sim_game = copy.deepcopy(self.game)
                 sim_player = sim_game.get_player(self.player_id)
                 
-                # Holen der Karten-Äquivalente im simulierten Spiel
-                sim_combo_ids = [card.static_data['name'] for card in combo] # Vereinfacht über Namen
-                sim_attackers = [c for c in sim_player.battlefield if c.name in sim_combo_ids]
+                sim_combo_ids = [card.static_data['oracle_id'] for card in combo]
+                sim_attackers = [c for c in sim_player.battlefield if c.static_data['oracle_id'] in sim_combo_ids]
                 
                 for attacker in sim_attackers:
                     attacker.is_attacking = True
                 
-                # Lasse den Gegner auf den simulierten Angriff reagieren
                 sim_opponent = sim_game.get_player(1 - self.player_id)
-                sim_opponent.declare_blockers() # Gegner nutzt seine Block-Logik
-                sim_game.assign_combat_damage()
+                sim_opponent.declare_blockers()
+                # Für eine korrekte Simulation müssen beide Schadenssegmente durchlaufen werden
+                sim_game.assign_combat_damage(first_strike=True)
+                sim_game.check_state_based_actions()
+                sim_game.assign_combat_damage(first_strike=False)
                 sim_game.check_state_based_actions()
 
-                # Bewerte das Ergebnis
                 current_score = sim_player.evaluate_state()
 
                 if current_score > best_score:
@@ -236,19 +234,20 @@ class Player:
         
         if best_attack_combination:
             logging.info(f"Entscheidung: Optimaler Angriff gefunden mit Score {best_score:.2f}. Greife an mit: {[c.name for c in best_attack_combination]}")
-            # Führe den besten gefundenen Angriff im echten Spiel aus
             for attacker_card in best_attack_combination:
-                # Finde die echte Karte im Spielzustand
                 real_attacker = next(c for c in self.battlefield if c.static_data['oracle_id'] == attacker_card.static_data['oracle_id'])
                 real_attacker.is_attacking = True
-                real_attacker.is_tapped = True
+                # KORRIGIERT: Vigilance-Logik. Kreaturen tappen nur, wenn sie KEINE Vigilance haben.
+                if not real_attacker.has_keyword('Vigilance'):
+                    real_attacker.is_tapped = True
         else:
             logging.info("Entscheidung: Kein vorteilhafter Angriff gefunden.")
+
 
     def declare_blockers(self):
         """
         KI-Logik: Findet die beste Verteidigung durch eine wertorientierte Zuweisung
-        von Blockern zu Angreifern.
+        von Blockern zu Angreifern, unter Berücksichtigung von Flying und Fear.
         """
         attackers = [c for c in self.game.active_player.battlefield if c.is_attacking]
         potential_blockers = [c for c in self.battlefield if 'Creature' in c.static_data.get('type_line', '') and not c.is_tapped]
@@ -256,32 +255,47 @@ class Player:
         if not attackers or not potential_blockers:
             return
 
-        # Bewerte jeden möglichen Block
         for attacker in attackers:
             best_blocker_for_this_attacker = None
-            # Der Basis-Fall ist, nicht zu blocken. Schaden geht durch.
-            best_trade_value = -int(attacker.static_data.get('power', 0)) # Negativer Wert des Lebensverlusts
+            best_trade_value = -int(attacker.power)
 
+            # HINZUGEFÜGT: Filtere Blocker basierend auf den Fähigkeiten des Angreifers
+            valid_blockers = []
             for blocker in potential_blockers:
-                # Simuliere den Trade-Wert
-                attacker_power = int(attacker.static_data.get('power', 0))
+                # Prüfe, ob dieser Blocker bereits einem anderen Angreifer zugewiesen wurde
+                if hasattr(blocker, 'is_blocking') and blocker.is_blocking:
+                    continue
+
+                can_block = True
+                # Flying Check: Kann nur von Flying oder Reach geblockt werden.
+                if attacker.has_keyword('Flying') and not blocker.has_keyword('Flying') and not blocker.has_keyword('Reach'):
+                    can_block = False
+                # Fear Check: Kann nicht von nicht-schwarzen, nicht-Artefakt Kreaturen geblockt werden.
+                if attacker.has_keyword('Fear'):
+                    is_black = 'B' in blocker.static_data.get('color_identity', [])
+                    is_artifact = 'Artifact' in blocker.static_data.get('type_line', '')
+                    if not is_black and not is_artifact:
+                        can_block = False
+                
+                if can_block:
+                    valid_blockers.append(blocker)
+
+            # Führe die Trade-Bewertung nur für valide Blocker durch
+            for blocker in valid_blockers:
+                attacker_power = attacker.power
                 attacker_toughness = attacker.toughness
-                blocker_power = int(blocker.static_data.get('power', 0))
+                blocker_power = blocker.power
                 blocker_toughness = blocker.toughness
 
-                # Bewertet, welche Kreaturen sterben würden
                 attacker_dies = blocker_power >= attacker_toughness
                 blocker_dies = attacker_power >= blocker_toughness
 
-                # Wert der Kreaturen (Power + Toughness als Heuristik)
                 attacker_value = attacker_power + attacker_toughness
                 blocker_value = blocker_power + blocker_toughness
 
                 trade_value = 0
-                if attacker_dies:
-                    trade_value += attacker_value
-                if blocker_dies:
-                    trade_value -= blocker_value
+                if attacker_dies: trade_value += attacker_value
+                if blocker_dies: trade_value -= blocker_value
                 
                 if trade_value > best_trade_value:
                     best_trade_value = trade_value
@@ -289,10 +303,8 @@ class Player:
 
             if best_blocker_for_this_attacker:
                 logging.info(f"KI-Block-Analyse: Bester Block für '{attacker.name}' ist '{best_blocker_for_this_attacker.name}' (Trade-Wert: {best_trade_value}).")
-                # Weist den Blocker zu, aber nur, wenn er noch nicht verwendet wird
-                if not hasattr(best_blocker_for_this_attacker, 'is_blocking'):
-                    attacker.blocker = best_blocker_for_this_attacker
-                    best_blocker_for_this_attacker.is_blocking = True # Markiere als verwendet
+                attacker.blocker = best_blocker_for_this_attacker
+                best_blocker_for_this_attacker.is_blocking = True # Markiere als verwendet für diesen Kampf
 
     def evaluate_state(self) -> float:
         """

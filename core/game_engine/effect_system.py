@@ -1,5 +1,10 @@
 from enum import Enum, auto
-from .card import Card
+from typing import TYPE_CHECKING # NEU: Import für Type-Checking
+
+# NEU: Dieser Block wird nur von Typ-Prüfern (wie Pylance) ausgeführt,
+# nicht aber vom Python-Interpreter selbst. Das bricht den Import-Kreislauf.
+if TYPE_CHECKING:
+    from .card import Card
 
 class EffectDuration(Enum):
     PERMANENT = auto()

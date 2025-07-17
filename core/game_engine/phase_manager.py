@@ -1,6 +1,11 @@
 from enum import Enum, auto
-from .game_state import GameState
-from .effect_system import EffectDuration
+import logging
+from typing import TYPE_CHECKING # NEU: Import für Type-Checking
+
+# NEU: Dieser Block bricht den Import-Kreislauf
+if TYPE_CHECKING:
+    from .game_state import GameState
+    from .effect_system import EffectDuration
 
 class TurnPhase(Enum):
     BEGINNING = auto()
@@ -61,24 +66,25 @@ class PhaseManager:
 
     def execute_current_step_actions(self):
         """Führt automatische, regelbasierte Aktionen für den aktuellen Schritt aus."""
-        player = self.game_state.active_player
-        opponent = self.game_state.get_player(1 - player.player_id)
-        print(f"--- {self.current_step.name} (Spieler {player.player_id}) ---")
+        active_player = self.game_state.active_player
+        opponent = self.game_state.get_player(1 - active_player.player_id)
+        logging.info(f"--- {self.current_step.name} (Spieler {active_player.player_id}) ---")
 
         if self.current_step == TurnStep.UNTAP:
-            print(f"--- Zug {self.game_state.turn_number} (Spieler {player.player_id}): Enttappsegment ---")
-            for permanent in player.battlefield:
+            for permanent in active_player.battlefield:
                 permanent.is_tapped = False
                 permanent.is_attacking = False
-                # Kreaturen, die seit Beginn des letzten Zuges kontrolliert wurden,
-                # verlieren ihre Einsatzverzögerung.
                 permanent.summoning_sick = False
         
         elif self.current_step == TurnStep.DRAW:
-            player.draw_card()
+            # The draw action happens only if it's the active player's turn,
+            # which is handled by the main game loop's logic.
+            # In a more complex game, we'd check against turn number.
+            if self.game_state.turn_number > 0 or self.game_state.active_player_index == 1:
+                 active_player.draw_card()
 
         elif self.current_step == TurnStep.DECLARE_ATTACKERS:
-            player.declare_attackers()
+            active_player.declare_attackers()
 
         elif self.current_step == TurnStep.DECLARE_BLOCKERS:
             opponent.declare_blockers()
@@ -90,14 +96,19 @@ class PhaseManager:
             self.game_state.assign_combat_damage(first_strike=False)
             
         elif self.current_step == TurnStep.CLEANUP:
-            # Entferne "until end of turn" Effekte
-            for p in self.game.players:
+            # Reset "lands played" count for the active player
+            active_player.lands_played_this_turn = 0
+            
+            # Reset effects and mana for ALL players
+            for p in self.game_state.players: # CORRECTED: was self.game
+                # Remove "until end of turn" effects
                 for permanent in p.battlefield:
                     permanent.active_effects = [
                         effect for effect in permanent.active_effects 
                         if effect.duration != EffectDuration.END_OF_TURN
                     ]
-            player.lands_played_this_turn = 0
+                # Reset mana pools
+                p.mana_pool = {k: 0 for k in p.mana_pool}
             
     def end_turn(self):
         """Beendet den aktuellen Zug und übergibt an den nächsten Spieler."""

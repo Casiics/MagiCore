@@ -60,7 +60,7 @@ class GameState:
     
 
     def assign_combat_damage(self, first_strike: bool):
-        """Verrechnet Kampfschaden, getrennt nach Erstschlag."""
+        """Verrechnet Kampfschaden, inkl. Deathtouch und Lifelink."""
         log_prefix = "Erstschlag" if first_strike else "Regulärer"
         logging.info(f"--- {log_prefix} Kampfschaden ---")
         
@@ -70,42 +70,41 @@ class GameState:
         all_attackers = [c for c in attacking_player.battlefield if c.is_attacking]
 
         for attacker in all_attackers:
-            # Kreaturen mit Erstschlag teilen im ersten Segment Schaden aus.
-            # Kreaturen ohne Erstschlag teilen im zweiten Segment Schaden aus.
-            # Kreaturen mit Doppelschlag (Double Strike) teilen in beiden Segmenten Schaden aus.
             deals_damage_this_segment = (
                 (first_strike and (attacker.has_keyword('First Strike') or attacker.has_keyword('Double Strike'))) or
                 (not first_strike and not attacker.has_keyword('First Strike'))
             )
-
             if not deals_damage_this_segment:
                 continue
 
-            damage = int(attacker.static_data.get('power', 0))
-            if damage <= 0: continue
-            
-            if hasattr(attacker, 'blocker'):
-                blocker = attacker.blocker
-                lethal_damage_to_blocker = blocker.toughness - blocker.damage_marked
-                
-                # Weist Schaden dem Blocker zu
-                actual_damage_to_blocker = min(damage, lethal_damage_to_blocker)
-                blocker.damage_marked += actual_damage_to_blocker
-                logging.info(f"'{attacker.name}' fügt '{blocker.name}' {actual_damage_to_blocker} Schaden zu.")
+            attacker_damage = attacker.power
+            if attacker_damage <= 0: continue
 
-                # Prüfe auf Trampelschaden
-                if attacker.has_keyword('Trample'):
-                    trample_damage = damage - actual_damage_to_blocker
-                    if trample_damage > 0:
-                        logging.info(f"Trampelschaden: '{attacker.name}' fügt Spieler {defending_player.player_id} {trample_damage} Schaden zu.")
-                        defending_player.life -= trample_damage
+            if hasattr(attacker, 'blocker') and attacker.blocker:
+                blocker = attacker.blocker
+                blocker_damage = blocker.power
                 
-                # Schaden vom Blocker an den Angreifer
-                # (Diese Logik bleibt unverändert)
+                # Deathtouch-Logik
+                if attacker.has_keyword('Deathtouch'):
+                    blocker.damage_marked += blocker.toughness
+                else:
+                    blocker.damage_marked += attacker_damage
+                
+                if blocker.has_keyword('Deathtouch'):
+                    attacker.damage_marked += attacker.toughness
+                else:
+                    attacker.damage_marked += blocker_damage
+                
+                # Lifelink-Logik
+                if attacker.has_keyword('Lifelink'):
+                    attacking_player.life += attacker_damage
+                if blocker.has_keyword('Lifelink'):
+                    defending_player.life += blocker_damage
             else:
                 # Ungeblockter Schaden
-                logging.info(f"'{attacker.name}' fügt Spieler {defending_player.player_id} {damage} Schaden zu.")
-                defending_player.life -= damage
+                defending_player.life -= attacker_damage
+                if attacker.has_keyword('Lifelink'):
+                    attacking_player.life += attacker_damage
 
     def check_state_based_actions(self):
         """
