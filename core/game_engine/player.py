@@ -41,29 +41,81 @@ class Player:
 
 
     def get_available_actions(self) -> List[str]:
-        """Gibt eine Liste aller möglichen Aktionen zurück, inkl. Spontanzauber und aktivierbarer Fähigkeiten."""
+        """Gibt eine Liste aller möglichen legalen Aktionen zurück."""
         actions = ["pass_priority"]
+        is_main_phase = "MAIN" in self.game.phase_manager.current_phase.name
+        is_our_turn = self.game.active_player.player_id == self.player_id
+        stack_is_empty = self.game.stack_manager.is_empty()
 
-        # 1. Prüfe auf Zauber von der Hand
+        # 1. Land spielen (nur in der eigenen Hauptphase bei leerem Stack)
+        if is_our_turn and is_main_phase and stack_is_empty and self.lands_played_this_turn == 0:
+            for card in self.hand:
+                if card.is_land():
+                    actions.append(f"play_land_{card.name}")
+
+        # 2. Zauber wirken
         for card in self.hand:
-            # Ist es ein Spontanzauber ODER sind wir in unserer Hauptphase bei leerem Stack?
-            is_main_phase = "MAIN" in self.game.phase_manager.current_phase.name
-            is_our_turn = self.game.active_player.player_id == self.player_id
+            # Spontanzauber können immer gewirkt werden, andere Zauber nur in der eigenen Hauptphase bei leerem Stack.
+            if "Instant" in card.static_data.get('type_line', '') or (is_our_turn and is_main_phase and stack_is_empty):
+                cost_dict = self._parse_cost_string(card.static_data.get('mana_cost', ''))
+                # Vereinfachte Prüfung, ob Mana potenziell verfügbar ist.
+                # Eine volle Prüfung würde alle Manaquellen berücksichtigen.
+                available_mana_sources = sum(1 for p in self.battlefield if p.is_land() and not p.is_tapped)
+                if available_mana_sources >= sum(cost_dict.values()):
+                     actions.append(f"cast_{card.name}")
+
+        # 3. Angreifen (wird durch PhaseManager ausgelöst, nicht als Aktion gewählt)
+        # 4. Fähigkeiten aktivieren (TODO)
+
+        return list(set(actions)) # Entferne Duplikate
+
+    def choose_action(self) -> str:
+        """
+        Die KI wählt die beste Aktion durch Simulation und Bewertung aller Möglichkeiten.
+        """
+        available_actions = self.get_available_actions()
+        if len(available_actions) == 1 and available_actions[0] == "pass_priority":
+            return "pass_priority"
+
+        best_action = "pass_priority"
+        # Der Basis-Score ist der Zustand, wenn wir einfach passen.
+        best_score = self.evaluate_state()
+        logging.info(f"KI Spieler {self.player_id} analysiert Aktionen... Basis-Score: {best_score:.2f}")
+
+        for action in available_actions:
+            if action == "pass_priority":
+                continue
+
+            # Simuliere die Ausführung der Aktion
+            sim_game = copy.deepcopy(self.game)
+            sim_player = sim_game.get_player(self.player_id)
             
-            if "Instant" in card.static_data.get('type_line', '') or (is_main_phase and is_our_turn and self.game.stack_manager.is_empty()):
-                cost = int(card.static_data.get('cmc', 99))
-                # TODO: Verfeinere Manaprüfung für farbige Kosten
-                available_mana = sum(1 for p in self.battlefield if p.is_land() and not p.is_tapped)
-                if available_mana >= cost:
-                    actions.append(f"cast_{card.name}")
+            # Führe die Aktion in der Simulation aus
+            if action.startswith("play_land_"):
+                card_name = action.replace("play_land_", "")
+                card_to_play = next((c for c in sim_player.hand if c.name == card_name), None)
+                if card_to_play:
+                    sim_player.play_land(card_to_play)
 
-        # 2. Prüfe auf aktivierbare Fähigkeiten von Kreaturen auf dem Schlachtfeld
-        for permanent in self.battlefield:
-            if permanent.name == "Llanowar Elves" and not permanent.is_tapped:
-                actions.append(f"activate_{permanent.name}")
+            elif action.startswith("cast_"):
+                card_name = action.replace("cast_", "")
+                card_to_cast = next((c for c in sim_player.hand if c.name == card_name), None)
+                if card_to_cast:
+                    sim_player.cast_spell(card_to_cast)
+                    # In der Sim müssen wir den Stack manuell auflösen
+                    if not sim_game.stack_manager.is_empty():
+                        sim_game.stack_manager.resolve_top_item()
 
-        return actions
+            # Bewerte den resultierenden Zustand
+            current_score = sim_player.evaluate_state()
+            logging.info(f"  Aktion '{action}' -> Sim-Score: {current_score:.2f}")
 
+            if current_score > best_score:
+                best_score = current_score
+                best_action = action
+        
+        logging.info(f"KI Spieler {self.player_id} wählt beste Aktion: '{best_action}' (Score: {best_score:.2f})")
+        return best_action
 
     def play_land(self, card_in_hand: 'Card') -> bool:
         """Versucht, eine Landkarte von der Hand auf das Schlachtfeld zu spielen."""
@@ -339,20 +391,6 @@ class Player:
 
     
 
-    def choose_action(self) -> str:
-        """
-        Die KI wählt die beste Aktion aus der Liste der verfügbaren Aktionen.
-        Momentan wird immer die erste Nicht-Passen-Aktion gewählt.
-        """
-        available_actions = self.get_available_actions()
-        # In einer echten KI würde hier die Zustandsbewertung für jede Aktion erfolgen.
-        if len(available_actions) > 1:
-            # Wähle die erste Aktion, die nicht "pass_priority" ist.
-            action_to_take = next((a for a in available_actions if a != "pass_priority"), "pass_priority")
-            logging.info(f"KI Spieler {self.player_id} wählt Aktion: {action_to_take}")
-            return action_to_take
-
-        return "pass_priority"
 
     def __repr__(self) -> str:
         return f"Player(id={self.player_id}, life={self.life}, hand_size={len(self.hand)})"
